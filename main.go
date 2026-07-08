@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LogicSamurai/Chirpy/internal/auth"
 	"github.com/LogicSamurai/Chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -21,6 +23,68 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
+}
+
+func (cfg *apiConfig) loginHandler(response http.ResponseWriter, request *http.Request) {
+	type requestBody struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(request.Body)
+	requestData := requestBody{}
+
+
+	if err := decoder.Decode(&requestData); err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+	}
+
+	fmt.Printf("EMAIL %v pASSWOR: %v ================\n", requestData.Email, requestData.Password)
+
+	user, err := cfg.DB.GetUserByEmail(request.Context(), requestData.Email)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+				// User doesn't exist
+				response.WriteHeader(http.StatusUnauthorized) // or StatusNotFound depending on your API
+				return
+		}
+		response.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	checkPassword, err := auth.CheckPasswordHash(requestData.Password, user.HashedPassword)
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if !checkPassword {
+		response.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	type responseFormat struct {
+		Id         string    `json:"id"`
+		Created_at time.Time `json:"created_at"`
+		Updated_at time.Time `json:"updated_at"`
+		Email      string    `json:"email"`
+	}
+
+	responseBody := responseFormat{
+		Id:         user.ID.String(),
+		Created_at: user.CreatedAt,
+		Updated_at: user.UpdatedAt,
+		Email:      user.Email,
+	}
+
+	data, err := json.Marshal(responseBody)
+	if err != nil {
+		fmt.Printf("Error marshalling JSON: %s", err)
+		response.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	response.WriteHeader(http.StatusOK)
+	response.Write(data)
 }
 
 func (cfg *apiConfig) getChirpByIdHandler(response http.ResponseWriter, request *http.Request) {
@@ -231,7 +295,8 @@ func (cfg *apiConfig) createChirpHandler(response http.ResponseWriter, request *
 
 func (cfg *apiConfig) createUserHandler(response http.ResponseWriter, request *http.Request) {
 	type requestBody struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -250,11 +315,18 @@ func (cfg *apiConfig) createUserHandler(response http.ResponseWriter, request *h
 		return
 	}
 
+	hashedPassword, err := auth.HashPassword(requestData.Password)
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	userParams := database.CreateUserParams{
-		ID:        uuid,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		Email:     requestData.Email,
+		ID:             uuid,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Email:          requestData.Email,
+		HashedPassword: hashedPassword,
 	}
 
 	user, err := cfg.DB.CreateUser(request.Context(), userParams)
@@ -349,6 +421,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{id}", cfg.getChirpByIdHandler)
+	mux.HandleFunc("POST /api/login", cfg.loginHandler)
 
 	server := http.Server{
 		Handler: mux,
