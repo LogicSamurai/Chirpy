@@ -23,12 +23,14 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	Platform       string
+	Jwt_secret	string
 }
 
 func (cfg *apiConfig) loginHandler(response http.ResponseWriter, request *http.Request) {
 	type requestBody struct {
 		Password string `json:"password"`
 		Email    string `json:"email"`
+		Expires_in_seconds int `json:"expires_in_seconds"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -37,6 +39,12 @@ func (cfg *apiConfig) loginHandler(response http.ResponseWriter, request *http.R
 
 	if err := decoder.Decode(&requestData); err != nil {
 		response.WriteHeader(http.StatusInternalServerError)
+	}
+
+	if requestData.Expires_in_seconds == 0 {
+		requestData.Expires_in_seconds = 3600
+	} else if requestData.Expires_in_seconds > 3600 {
+		requestData.Expires_in_seconds = 3600
 	}
 
 	fmt.Printf("EMAIL %v pASSWOR: %v ================\n", requestData.Email, requestData.Password)
@@ -68,6 +76,17 @@ func (cfg *apiConfig) loginHandler(response http.ResponseWriter, request *http.R
 		Created_at time.Time `json:"created_at"`
 		Updated_at time.Time `json:"updated_at"`
 		Email      string    `json:"email"`
+		Token	   string    `json:"token"`
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.Jwt_secret, time.Duration(requestData.Expires_in_seconds) * time.Second)	
+	fmt.Println("JWT Auth Token================")
+	fmt.Printf("Error: %v\n", err)        // Add this
+	fmt.Printf("Token: %s\n", token)  
+	
+	if err != nil {
+		response.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	responseBody := responseFormat{
@@ -75,6 +94,7 @@ func (cfg *apiConfig) loginHandler(response http.ResponseWriter, request *http.R
 		Created_at: user.CreatedAt,
 		Updated_at: user.UpdatedAt,
 		Email:      user.Email,
+		Token:		token,
 	}
 
 	data, err := json.Marshal(responseBody)
@@ -182,9 +202,30 @@ func (cfg *apiConfig) getChirpsHandler(response http.ResponseWriter, request *ht
 }
 
 func (cfg *apiConfig) createChirpHandler(response http.ResponseWriter, request *http.Request) {
+	// Debug: Check what header we're getting
+    authHeader := request.Header.Get("Authorization")
+    fmt.Printf("Raw Auth Header: '%s'\n", authHeader)
+    
+    token, err := auth.GetBearerToken(request.Header)
+    if err != nil {
+        fmt.Printf("GetBearerToken Error: %v\n", err)
+        response.WriteHeader(http.StatusUnauthorized)
+        return
+    }
+    
+    fmt.Printf("Extracted Token: '%s'\n", token)
+    
+    userID, err := auth.ValidateJWT(token, cfg.Jwt_secret)
+    if err != nil {
+        fmt.Printf("ValidateJWT Error: %v\n", err)
+        response.WriteHeader(http.StatusUnauthorized)
+        return
+    }
+    
+    fmt.Printf("Validated userID: %s\n", userID)
+
 	type requestBody struct {
 		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
 	}
 
 	decoder := json.NewDecoder(request.Body)
@@ -239,7 +280,7 @@ func (cfg *apiConfig) createChirpHandler(response http.ResponseWriter, request *
 	cleanedBody = strings.Join(words, " ")
 
 	// Check if user exists
-	_, err := cfg.DB.GetUserById(request.Context(), requestData.UserID)
+	_, err = cfg.DB.GetUserById(request.Context(), userID)
 	if err != nil {
 		response.WriteHeader(http.StatusInternalServerError)
 		return
@@ -256,7 +297,7 @@ func (cfg *apiConfig) createChirpHandler(response http.ResponseWriter, request *
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		Body:      cleanedBody,
-		UserID:    requestData.UserID,
+		UserID:    userID,
 	}
 
 	chirp, err := cfg.DB.CreateChirp(request.Context(), chirpParams)
@@ -403,6 +444,7 @@ func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	jwt_secret := os.Getenv("JWT_SECRET")
 	db, err := sql.Open("postgres", dbURL)
 	dbQueries := database.New(db)
 
@@ -410,6 +452,7 @@ func main() {
 	cfg := apiConfig{
 		DB:       dbQueries,
 		Platform: platform,
+		Jwt_secret: jwt_secret,
 	}
 
 	mux.Handle("/app/", http.StripPrefix("/app/", cfg.middlewareMetricsInc(http.FileServer(http.Dir("app")))))
