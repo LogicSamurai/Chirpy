@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
-	"fmt"
 	"time"
 
 	"github.com/alexedwards/argon2id"
@@ -94,4 +96,25 @@ func GetBearerToken(headers http.Header) (string, error) {
 	token = strings.TrimSpace(token)
 
 	return token, nil
+}
+
+func MakeRefreshToken() string {
+	randomString := make([]byte, 32)
+	rand.Read(randomString)
+
+	return hex.EncodeToString(randomString)
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("Missing Authorization headers")
+	}
+
+	parts := strings.Fields(authHeader)
+	if len(parts) == 2 && parts[0] == "ApiKey" {
+		return parts[1], nil
+	}
+
+	return "", errors.New("Missing ApiKey headers")
 }
